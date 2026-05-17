@@ -16,6 +16,8 @@ import com.team31.financetracker.budget.observer.MongoEventLogger;
 import com.team31.financetracker.budget.repository.BudgetRepository;
 import com.team31.financetracker.budget.repository.BudgetUsageEventRepository;
 import com.team31.financetracker.budget.adapter.CassandraRowAdapter;
+import com.team31.financetracker.contracts.feign.UserServiceClient;
+import com.team31.financetracker.contracts.dto.UserDTO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cache.annotation.CacheEvict;
@@ -33,6 +35,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 public class BudgetService {
@@ -43,13 +46,16 @@ public class BudgetService {
     private final BudgetUsageEventRepository budgetUsageEventRepository;
     private final MongoEventLogger mongoEventLogger;
     private final CassandraRowAdapter cassandraRowAdapter = new CassandraRowAdapter();
+    private final UserServiceClient userServiceClient;
 
     public BudgetService(BudgetRepository budgetRepository,
                          BudgetUsageEventRepository budgetUsageEventRepository,
-                         MongoEventLogger mongoEventLogger) {
+                         MongoEventLogger mongoEventLogger,
+                         UserServiceClient userServiceClient) {
         this.budgetRepository = budgetRepository;
         this.budgetUsageEventRepository = budgetUsageEventRepository;
         this.mongoEventLogger = mongoEventLogger;
+        this.userServiceClient = userServiceClient;
     }
 
     // ──────────────────── Observer helper ────────────────────
@@ -149,10 +155,6 @@ public class BudgetService {
             key = "'budget-service::S4-F3::' + #userId + '::' + #startDate + '::' + #endDate",
             unless = "#result == null")
     public BudgetPerformanceDTO getBudgetPerformance(Long userId, LocalDate startDate, LocalDate endDate) {
-        if (!budgetRepository.existsUserById(userId)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found");
-        }
-
         LocalDateTime start = startDate.atStartOfDay();
         LocalDateTime end = endDate.atTime(23, 59, 59, 999999999);
 
@@ -329,11 +331,37 @@ public class BudgetService {
                     status != null ? status.name() : null
             );
 
+            // Collect distinct userIds from the result set
+            List<Long> distinctUserIds = rows.stream()
+                    .map(row -> ((Number) row[1]).longValue())
+                    .distinct()
+                    .collect(Collectors.toList());
+
+            // Batch Feign call to user-service for userName resolution
+            Map<Long, String> userNameMap = new HashMap<>();
+            if (!distinctUserIds.isEmpty()) {
+                try {
+                    log.info("Calling UserServiceClient.getUsersByIds with ids={}", distinctUserIds);
+                    List<UserDTO> users = userServiceClient.getUsersByIds(distinctUserIds);
+                    log.info("UserServiceClient.getUsersByIds returned successfully");
+                    for (UserDTO user : users) {
+                        userNameMap.put(user.getId(), user.getName());
+                    }
+                } catch (Exception e) {
+                    log.warn("Feign call to user-service failed: {}", e.getMessage());
+                    // Fallback: use userId as userName
+                    for (Long uid : distinctUserIds) {
+                        userNameMap.put(uid, String.valueOf(uid));
+                    }
+                }
+            }
+
             List<BudgetAlertDTO> result = new ArrayList<>();
             for (Object[] row : rows) {
+                Long userId = ((Number) row[1]).longValue();
                 BudgetAlertDTO dto = new BudgetAlertDTO.Builder()
                         .budgetId(((Number) row[0]).longValue())
-                        .userName((String) row[1])
+                        .userName(userNameMap.getOrDefault(userId, String.valueOf(userId)))
                         .category(Category.valueOf((String) row[2]))
                         .budgetAmount(((Number) row[3]).doubleValue())
                         .spentAmount(((Number) row[4]).doubleValue())
@@ -344,6 +372,7 @@ public class BudgetService {
             }
             return result;
         } catch (Exception e) {
+            if (e instanceof ResponseStatusException) throw e;
             log.warn("getBudgetsNearLimit failed: {}", e.getMessage());
             return new ArrayList<>();
         }

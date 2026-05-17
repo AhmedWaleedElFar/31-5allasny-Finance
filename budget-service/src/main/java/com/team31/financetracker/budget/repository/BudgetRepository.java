@@ -12,8 +12,6 @@ import java.util.Optional;
 import com.team31.financetracker.budget.dto.BudgetAnalyticsProjection;
 public interface BudgetRepository extends JpaRepository<Budget, Long> {
 
-    @Query(value = "SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END FROM users WHERE id = :userId", nativeQuery = true)
-    boolean existsUserById(@Param("userId") Long userId);
 
     @Modifying
     @Query(value = "DELETE FROM budgets WHERE status IN ('COMPLETED', 'EXCEEDED') AND created_at < :cutoffDate", nativeQuery = true)
@@ -73,7 +71,7 @@ public interface BudgetRepository extends JpaRepository<Budget, Long> {
     @Query(value = """
     SELECT
         b.id AS budget_id,
-        CAST(b.user_id AS varchar) AS user_name,
+        b.user_id AS user_id,
         b.category AS category,
         b.budget_amount AS budget_amount,
         b.spent_amount AS spent_amount,
